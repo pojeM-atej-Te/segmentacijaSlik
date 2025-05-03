@@ -54,10 +54,79 @@ def kmeans(slika, k=3, iteracije=10):
 
     return segmentirana_slika.reshape(slika.shape).astype(np.uint8)
 
+
 def meanshift(slika, velikost_okna, dimenzija):
     '''Izvede segmentacijo slike z uporabo metode mean-shift.'''
-    pass
+    height, width, channels = slika.shape
 
+    # Pripravi prostor značilnic
+    if dimenzija == 3:  # samo barve
+        znacilnice = slika.reshape(-1, 3).astype(np.float64)
+    else:  # barve + lokacije
+        x_coords, y_coords = np.meshgrid(np.arange(width), np.arange(height))
+        x_coords = x_coords.flatten() * 255.0 / width
+        y_coords = y_coords.flatten() * 255.0 / height
+        barve = slika.reshape(-1, 3).astype(np.float64)
+        znacilnice = np.column_stack((x_coords, y_coords, barve))
+
+    vzorcenje = 10
+    vzorcene_tocke = znacilnice[::vzorcenje]
+    max_iteracije = 10
+    premaknjene_tocke = []
+
+    for i, tocka in enumerate(vzorcene_tocke):
+        trenutna_tocka = tocka.copy()
+
+        for _ in range(max_iteracije):
+            razdalje = np.array([manhattanska_razdalja(trenutna_tocka, t) for t in znacilnice])
+            utezi = gaussovo_jedro(razdalje, velikost_okna)
+            nova_tocka = np.sum(utezi[:, np.newaxis] * znacilnice, axis=0) / np.sum(utezi)
+
+            if manhattanska_razdalja(nova_tocka, trenutna_tocka) < 0.1:
+                break
+
+            trenutna_tocka = nova_tocka
+
+        premaknjene_tocke.append(trenutna_tocka)
+
+    min_cd = velikost_okna / 2
+    centri = []
+
+    for tocka in premaknjene_tocke:
+        dodan = False
+        for i, center in enumerate(centri):
+            if manhattanska_razdalja(tocka, center) < min_cd:
+                centri[i] = (centri[i] + tocka) / 2
+                dodan = True
+                break
+
+        if not dodan:
+            centri.append(tocka)
+
+    centri = np.array(centri)
+    oznake = np.zeros(znacilnice.shape[0], dtype=int)
+    for i, tocka in enumerate(znacilnice):
+        najboljsi_center = 0
+        najmanjsa_razdalja = float('inf')
+
+        for j, center in enumerate(centri):
+            razdalja = manhattanska_razdalja(tocka, center)
+            if razdalja < najmanjsa_razdalja:
+                najmanjsa_razdalja = razdalja
+                najboljsi_center = j
+
+        oznake[i] = najboljsi_center
+
+    if dimenzija == 3:
+        barve_centrov = centri
+    else:
+        barve_centrov = centri[:, 2:5]
+
+    segmentirana_slika = np.zeros((height * width, 3))
+    for i in range(len(centri)):
+        segmentirana_slika[oznake == i] = barve_centrov[i]
+
+    return segmentirana_slika.reshape((height, width, 3)).astype(np.uint8)
 
 def izracunaj_centre(slika, izbira, dimenzija_centra, T):
     '''Izračuna centre za metodo kmeans.'''
@@ -139,10 +208,13 @@ def izracunaj_centre(slika, izbira, dimenzija_centra, T):
 
     return centri
 
-
 def manhattanska_razdalja(vektor1, vektor2):
     """Izračuna manhattansko razdaljo med dvema vektorjema."""
     return np.sum(np.abs(vektor1 - vektor2))
+
+def gaussovo_jedro(d, h):
+    """Izračuna gaussovo jedro."""
+    return np.exp(-d**2 / (2 * h**2))
 
 if __name__ == "__main__":
     pass
