@@ -9,34 +9,77 @@ jobs:
   update-jira:
     runs-on: ubuntu-latest
     if: github.event.pull_request.merged == true
+    timeout-minutes: 5  # Prevent workflow from running too long
+
     steps:
+      - name: Check pull request information
+        id: check-pr
+        run: |
+          echo "PR Title: ${{ github.event.pull_request.title }}"
+          if [ -z "${{ github.event.pull_request.title }}" ]; then
+            echo "WARNING: Pull request title is empty or undefined" 
+            echo "HAS_TITLE=false" >> $GITHUB_ENV
+          else
+            echo "HAS_TITLE=true" >> $GITHUB_ENV
+          fi
+
       - name: Login to Jira
+        id: login
         uses: atlassian/gajira-login@master
         env:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+        timeout-minutes: 1
 
       - name: Find Jira issue key in PR title
         id: find-key
+        if: env.HAS_TITLE == 'true'
         uses: atlassian/gajira-find-issue-key@master
         with:
-          string: ${{ github.event.pull_request.title }}
+          string: ${{ github.event.pull_request.title || 'No title provided' }}
+        continue-on-error: true
+
+      - name: Find Jira issue key in branch name (fallback)
+        id: find-key-branch
+        if: (steps.find-key.outcome == 'failure' || steps.find-key.outputs.issue == '') && env.HAS_TITLE == 'true'
+        uses: atlassian/gajira-find-issue-key@master
+        with:
+          string: ${{ github.event.pull_request.head.ref || 'No branch name' }}
         continue-on-error: true
 
       - name: Check if issue key was found
         id: check-issue
         run: |
-          if [ -n "${{ steps.find-key.outputs.issue }}" ]; then
+          ISSUE_KEY="${{ steps.find-key.outputs.issue }}"
+          if [ -z "$ISSUE_KEY" ]; then
+            ISSUE_KEY="${{ steps.find-key-branch.outputs.issue }}"
+          fi
+          
+          if [ -n "$ISSUE_KEY" ]; then
+            echo "ISSUE_KEY=$ISSUE_KEY" >> $GITHUB_ENV
             echo "ISSUE_FOUND=true" >> $GITHUB_ENV
+            echo "Found Jira issue key: $ISSUE_KEY"
           else
             echo "ISSUE_FOUND=false" >> $GITHUB_ENV
-            echo "No Jira issue key found in PR title: ${{ github.event.pull_request.title }}"
+            echo "::warning::No Jira issue key found in PR title or branch name"
           fi
 
       - name: Move Jira issue to Done
+        id: transition
         if: env.ISSUE_FOUND == 'true'
         uses: atlassian/gajira-transition@master
         with:
-          issue: ${{ steps.find-key.outputs.issue }}
+          issue: ${{ env.ISSUE_KEY }}
           transition: Done
+        timeout-minutes: 1
+
+      - name: Verify transition success
+        if: env.ISSUE_FOUND == 'true'
+        run: |
+          if [ "${{ steps.transition.outcome }}" == "success" ]; then
+            echo "Successfully moved ${{ env.ISSUE_KEY }} to Done status"
+          else
+            echo "::error::Failed to transition ${{ env.ISSUE_KEY }} to Done status"
+            exit 1
+          fi
