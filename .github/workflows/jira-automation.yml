@@ -9,24 +9,34 @@ jobs:
   update-jira:
     runs-on: ubuntu-latest
     if: github.event.pull_request.merged == true
-    
     steps:
-    - name: Login to Jira
-      uses: atlassian/gajira-login@master
-      env:
-        JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-        JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-        JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-        
-    - name: Find Jira issue key in PR title
-      id: find-key
-      uses: atlassian/gajira-find-issue-key@master
-      with:
-        string: ${{ github.event.pull_request.title }}
-        
-    - name: Move Jira issue to Done
-      if: steps.find-key.outputs.issue != ''
-      uses: atlassian/gajira-transition@master
-      with:
-        issue: ${{ steps.find-key.outputs.issue }}
-        transition: Done
+      - name: Login to Jira
+        uses: atlassian/gajira-login@master
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+
+      - name: Find Jira issue key in PR title
+        id: find-key
+        uses: atlassian/gajira-find-issue-key@master
+        with:
+          string: ${{ github.event.pull_request.title }}
+        continue-on-error: true
+
+      - name: Check if issue key was found
+        id: check-issue
+        run: |
+          if [ -n "${{ steps.find-key.outputs.issue }}" ]; then
+            echo "ISSUE_FOUND=true" >> $GITHUB_ENV
+          else
+            echo "ISSUE_FOUND=false" >> $GITHUB_ENV
+            echo "No Jira issue key found in PR title: ${{ github.event.pull_request.title }}"
+          fi
+
+      - name: Move Jira issue to Done
+        if: env.ISSUE_FOUND == 'true'
+        uses: atlassian/gajira-transition@master
+        with:
+          issue: ${{ steps.find-key.outputs.issue }}
+          transition: Done
