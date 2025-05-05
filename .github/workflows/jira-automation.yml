@@ -9,7 +9,7 @@ jobs:
   update-jira:
     runs-on: ubuntu-latest
     if: github.event.pull_request.merged == true
-    timeout-minutes: 5  # Prevent workflow from running too long
+    timeout-minutes: 5
 
     steps:
       - name: Check pull request information
@@ -17,7 +17,6 @@ jobs:
         run: |
           echo "PR Title: ${{ github.event.pull_request.title }}"
           if [ -z "${{ github.event.pull_request.title }}" ]; then
-            echo "WARNING: Pull request title is empty or undefined" 
             echo "HAS_TITLE=false" >> $GITHUB_ENV
           else
             echo "HAS_TITLE=true" >> $GITHUB_ENV
@@ -30,79 +29,55 @@ jobs:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-        timeout-minutes: 1
 
-      # Skip the atlassian/gajira-find-issue-key action and directly use our custom extractors
-
-      - name: Extract issue key from PR title
-        id: extract-key-title
-        if: env.HAS_TITLE == 'true'
+      - name: Extract issue key (title + branch fallback)
+        id: extract-key
         run: |
+          ISSUE_KEY=""
           PR_TITLE="${{ github.event.pull_request.title }}"
-          # Try standard format first (e.g., SEG-5)
-          ISSUE_KEY=$(echo "$PR_TITLE" | grep -o -E '[A-Z]+-[0-9]+' | head -n 1)
-          
-          # If not found, try to handle "Feature/seg 5 testing" format
-          if [ -z "$ISSUE_KEY" ]; then
-            # Check for patterns like "seg 5" and convert to proper format (case insensitive)
-            SEG_NUM=$(echo "$PR_TITLE" | grep -i -o -E 'seg\s+[0-9]+' | sed -E 's/seg\s+([0-9]+)/\1/g' | head -n 1)
-            if [ -n "$SEG_NUM" ]; then
-              ISSUE_KEY="SEG-$SEG_NUM"
-              echo "Converted 'seg $SEG_NUM' to proper issue key format: $ISSUE_KEY"
-            fi
-          fi
-          
-          if [ -n "$ISSUE_KEY" ]; then
-            echo "ISSUE_KEY=$ISSUE_KEY" >> $GITHUB_ENV
-            echo "Found issue key: $ISSUE_KEY"
-          else
-            echo "No issue key found in PR title"
-          fi
-
-      - name: Extract issue key from branch name (fallback)
-        id: extract-key-branch
-        if: env.HAS_TITLE == 'true' && !env.ISSUE_KEY
-        run: |
           BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
-          # Try standard format first (e.g., SEG-123)
-          ISSUE_KEY=$(echo "$BRANCH_NAME" | grep -o -E '[A-Z]+-[0-9]+' | head -n 1)
-          
-          # If not found, check for patterns like "SEG-5-testing" or "feature/SEG-5-testing"
+
+          echo "Checking PR title: $PR_TITLE"
+
+          # Standard pattern
+          ISSUE_KEY=$(echo "$PR_TITLE" | grep -o -E '[A-Z]+-[0-9]+' | head -n 1)
+
+          # Fallback: handle "seg 5" type
           if [ -z "$ISSUE_KEY" ]; then
-            # Extract patterns like SEG-5-xyz -> SEG-5
-            PARTIAL_KEY=$(echo "$BRANCH_NAME" | grep -o -E '[A-Z]+-[0-9]+' | head -n 1)
-            if [ -n "$PARTIAL_KEY" ]; then
-              ISSUE_KEY="$PARTIAL_KEY"
-            fi
-          fi
-          
-          # If still not found, try to parse formats like "feature/seg-5-testing" (case insensitive)
-          if [ -z "$ISSUE_KEY" ]; then
-            SEG_NUM=$(echo "$BRANCH_NAME" | grep -i -o -E 'seg-[0-9]+' | sed -E 's/seg-([0-9]+).*/\1/g' | head -n 1)
+            SEG_NUM=$(echo "$PR_TITLE" | grep -o -E 'seg\s+[0-9]+' | sed -E 's/seg\s+([0-9]+)/\1/' | head -n 1)
             if [ -n "$SEG_NUM" ]; then
               ISSUE_KEY="SEG-$SEG_NUM"
-              echo "Converted branch segment to proper issue key: $ISSUE_KEY"
             fi
           fi
-          
-          if [ -n "$ISSUE_KEY" ]; then
-            echo "ISSUE_KEY=$ISSUE_KEY" >> $GITHUB_ENV
-            echo "Found issue key from branch: $ISSUE_KEY"
-          else
-            echo "No issue key found in branch name"
+
+          # Fallback to branch name if still empty
+          if [ -z "$ISSUE_KEY" ]; then
+            echo "No issue key found in title. Checking branch: $BRANCH_NAME"
+            ISSUE_KEY=$(echo "$BRANCH_NAME" | grep -o -E '[A-Z]+-[0-9]+' | head -n 1)
+            if [ -z "$ISSUE_KEY" ]; then
+              SEG_NUM=$(echo "$BRANCH_NAME" | grep -o -E 'seg-?[0-9]+' | sed -E 's/seg-?([0-9]+).*/\1/' | head -n 1)
+              if [ -n "$SEG_NUM" ]; then
+                ISSUE_KEY="SEG-$SEG_NUM"
+              fi
+            fi
           fi
 
-      # Add a debug step to confirm what we found
-      - name: Debug issue key extraction
-        run: |
-          echo "Extracted Issue Key: ${ISSUE_KEY:-None}"
+          if [ -n "$ISSUE_KEY" ]; then
+            echo "Found issue key: $ISSUE_KEY"
+            echo "ISSUE_KEY=$ISSUE_KEY" >> $GITHUB_ENV
+            echo "::set-output name=issue_key::$ISSUE_KEY"
+          else
+            echo "No Jira issue key found"
+            echo "ISSUE_KEY=" >> $GITHUB_ENV
+            echo "::set-output name=issue_key::"
+          fi
 
       - name: Check if issue key was found
         id: check-issue
         run: |
-          if [ -n "$ISSUE_KEY" ]; then
+          if [ -n "${{ steps.extract-key.outputs.issue_key }}" ]; then
             echo "ISSUE_FOUND=true" >> $GITHUB_ENV
-            echo "Final Jira issue key: $ISSUE_KEY"
+            echo "::notice::Final Jira issue key: ${{ steps.extract-key.outputs.issue_key }}"
           else
             echo "ISSUE_FOUND=false" >> $GITHUB_ENV
             echo "::warning::No Jira issue key found in PR title or branch name"
@@ -113,14 +88,13 @@ jobs:
         if: env.ISSUE_FOUND == 'true'
         uses: atlassian/gajira-transition@master
         with:
-          issue: ${{ env.ISSUE_KEY }}
+          issue: ${{ steps.extract-key.outputs.issue_key }}
           list: true
-        continue-on-error: true
 
       - name: Show available transitions
         if: env.ISSUE_FOUND == 'true'
         run: |
-          echo "Available transitions for ${{ env.ISSUE_KEY }}:"
+          echo "Available transitions for ${{ steps.extract-key.outputs.issue_key }}:"
           echo "${{ steps.get-transitions.outputs.transitions }}"
 
       - name: Move Jira issue to Done
@@ -128,64 +102,15 @@ jobs:
         if: env.ISSUE_FOUND == 'true'
         uses: atlassian/gajira-transition@master
         with:
-          issue: ${{ env.ISSUE_KEY }}
-          transition: "Done"  # Try the standard name first
-        continue-on-error: true
-        timeout-minutes: 1
+          issue: ${{ steps.extract-key.outputs.issue_key }}
+          transition: "31"
 
-      - name: Try alternative transition names if first attempt failed
-        if: env.ISSUE_FOUND == 'true' && steps.transition.outcome != 'success'
+      - name: Verify transition success
+        if: env.ISSUE_FOUND == 'true'
         run: |
-          echo "First transition attempt failed, trying alternatives..."
-          
-          # Store common transition names/IDs for student Jira instances
-          TRANSITIONS=("31" "41" "51" "61" "71" "21" "Done" "Resolved" "Close" "Closed" "Complete" "Completed" "Finish" "Finished")
-          
-          for TRANSITION in "${TRANSITIONS[@]}"; do
-            echo "Trying transition: $TRANSITION"
-            OUTPUT=$(curl -s -X POST \
-              -H "Authorization: Basic $(echo -n ${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }} | base64)" \
-              -H "Content-Type: application/json" \
-              --data "{\"transition\": {\"id\": \"$TRANSITION\"}}" \
-              "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${{ env.ISSUE_KEY }}/transitions" \
-              -o /dev/null -w "%{http_code}")
-            
-            if [[ "$OUTPUT" == "204" ]]; then
-              echo "Successfully transitioned issue with: $TRANSITION"
-              echo "TRANSITION_SUCCESS=true" >> $GITHUB_ENV
-              break
-            elif [[ "$OUTPUT" == "400" ]]; then
-              # Try as name instead of ID
-              OUTPUT=$(curl -s -X POST \
-                -H "Authorization: Basic $(echo -n ${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }} | base64)" \
-                -H "Content-Type: application/json" \
-                --data "{\"transition\": {\"name\": \"$TRANSITION\"}}" \
-                "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${{ env.ISSUE_KEY }}/transitions" \
-                -o /dev/null -w "%{http_code}")
-              
-              if [[ "$OUTPUT" == "204" ]]; then
-                echo "Successfully transitioned issue with name: $TRANSITION"
-                echo "TRANSITION_SUCCESS=true" >> $GITHUB_ENV
-                break
-              fi
-            fi
-            echo "Transition $TRANSITION failed with status $OUTPUT"
-          done
-          
-          if [[ -z "$TRANSITION_SUCCESS" ]]; then
-            echo "::warning::Failed to transition issue with any of the common transition IDs/names"
-          fi
-
-      - name: Report final status
-        run: |
-          if [ "${{ env.ISSUE_FOUND }}" == "true" ]; then
-            if [ "${{ steps.transition.outcome }}" == "success" ] || [ "${{ env.TRANSITION_SUCCESS }}" == "true" ]; then
-              echo "✅ Successfully moved ${{ env.ISSUE_KEY }} to Done status"
-            else
-              echo "❌ Failed to transition ${{ env.ISSUE_KEY }} to Done status"
-              exit 1
-            fi
+          if [ "${{ steps.transition.outcome }}" == "success" ]; then
+            echo "✅ Successfully moved ${{ steps.extract-key.outputs.issue_key }} to Done status"
           else
-            echo "⚠️ No Jira issue key was found to update"
-            # Don't fail the workflow if no issue was found
+            echo "::error::Failed to transition ${{ steps.extract-key.outputs.issue_key }} to Done status"
+            exit 1
           fi
