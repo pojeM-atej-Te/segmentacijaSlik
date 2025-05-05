@@ -90,6 +90,21 @@ jobs:
             echo "No issue key found in branch name"
           fi
 
+      - name: Get available transitions
+        id: get-transitions
+        if: env.ISSUE_FOUND == 'true'
+        uses: atlassian/gajira-transition@master
+        with:
+          issue: ${{ env.ISSUE_KEY }}
+          list: true
+        continue-on-error: true
+
+      - name: Show available transitions
+        if: env.ISSUE_FOUND == 'true'
+        run: |
+          echo "Available transitions for ${{ env.ISSUE_KEY }}:"
+          echo "${{ steps.get-transitions.outputs.transitions }}"
+
       - name: Check if issue key was found
         id: check-issue
         run: |
@@ -107,8 +122,52 @@ jobs:
         uses: atlassian/gajira-transition@master
         with:
           issue: ${{ env.ISSUE_KEY }}
-          transition: Done
+          transition: "Done"  # Try the standard name first
+        continue-on-error: true
         timeout-minutes: 1
+
+      - name: Try alternative transition names if first attempt failed
+        if: env.ISSUE_FOUND == 'true' && steps.transition.outcome != 'success'
+        run: |
+          echo "First transition attempt failed, trying alternatives..."
+          
+          # Store common transition names/IDs for student Jira instances
+          TRANSITIONS=("31" "41" "51" "61" "71" "Done" "Resolved" "Close" "Closed" "Complete" "Completed" "Finish" "Finished")
+          
+          for TRANSITION in "${TRANSITIONS[@]}"; do
+            echo "Trying transition: $TRANSITION"
+            OUTPUT=$(curl -s -X POST \
+              -H "Authorization: Basic $(echo -n ${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }} | base64)" \
+              -H "Content-Type: application/json" \
+              --data "{\"transition\": {\"id\": \"$TRANSITION\"}}" \
+              "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${{ env.ISSUE_KEY }}/transitions" \
+              -o /dev/null -w "%{http_code}")
+            
+            if [[ "$OUTPUT" == "204" ]]; then
+              echo "Successfully transitioned issue with: $TRANSITION"
+              echo "TRANSITION_SUCCESS=true" >> $GITHUB_ENV
+              break
+            elif [[ "$OUTPUT" == "400" ]]; then
+              # Try as name instead of ID
+              OUTPUT=$(curl -s -X POST \
+                -H "Authorization: Basic $(echo -n ${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }} | base64)" \
+                -H "Content-Type: application/json" \
+                --data "{\"transition\": {\"name\": \"$TRANSITION\"}}" \
+                "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${{ env.ISSUE_KEY }}/transitions" \
+                -o /dev/null -w "%{http_code}")
+              
+              if [[ "$OUTPUT" == "204" ]]; then
+                echo "Successfully transitioned issue with name: $TRANSITION"
+                echo "TRANSITION_SUCCESS=true" >> $GITHUB_ENV
+                break
+              fi
+            fi
+            echo "Transition $TRANSITION failed with status $OUTPUT"
+          done
+          
+          if [[ -z "$TRANSITION_SUCCESS" ]]; then
+            echo "::warning::Failed to transition issue with any of the common transition IDs/names"
+          fi
 
       - name: Verify transition success
         if: env.ISSUE_FOUND == 'true'
