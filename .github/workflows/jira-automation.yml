@@ -32,34 +32,40 @@ jobs:
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
         timeout-minutes: 1
 
-      - name: Find Jira issue key in PR title
-        id: find-key
+      - name: Extract issue key from PR title
+        id: extract-key
         if: env.HAS_TITLE == 'true'
-        uses: atlassian/gajira-find-issue-key@master
-        with:
-          string: ${{ github.event.pull_request.title || 'No title provided' }}
-        continue-on-error: true
+        run: |
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          # Use grep to extract issue key pattern (e.g., SEG-123)
+          ISSUE_KEY=$(echo "$PR_TITLE" | grep -o -E '[A-Z]+-[0-9]+' | head -n 1)
+          if [ -n "$ISSUE_KEY" ]; then
+            echo "ISSUE_KEY=$ISSUE_KEY" >> $GITHUB_ENV
+            echo "Found issue key: $ISSUE_KEY"
+          else
+            echo "No issue key found in PR title"
+          fi
 
-      - name: Find Jira issue key in branch name (fallback)
-        id: find-key-branch
-        if: (steps.find-key.outcome == 'failure' || steps.find-key.outputs.issue == '') && env.HAS_TITLE == 'true'
-        uses: atlassian/gajira-find-issue-key@master
-        with:
-          string: ${{ github.event.pull_request.head.ref || 'No branch name' }}
-        continue-on-error: true
+      - name: Extract issue key from branch name (fallback)
+        id: extract-key-branch
+        if: env.HAS_TITLE == 'true' && !env.ISSUE_KEY
+        run: |
+          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+          # Use grep to extract issue key pattern (e.g., SEG-123)
+          ISSUE_KEY=$(echo "$BRANCH_NAME" | grep -o -E '[A-Z]+-[0-9]+' | head -n 1)
+          if [ -n "$ISSUE_KEY" ]; then
+            echo "ISSUE_KEY=$ISSUE_KEY" >> $GITHUB_ENV
+            echo "Found issue key from branch: $ISSUE_KEY"
+          else
+            echo "No issue key found in branch name"
+          fi
 
       - name: Check if issue key was found
         id: check-issue
         run: |
-          ISSUE_KEY="${{ steps.find-key.outputs.issue }}"
-          if [ -z "$ISSUE_KEY" ]; then
-            ISSUE_KEY="${{ steps.find-key-branch.outputs.issue }}"
-          fi
-          
           if [ -n "$ISSUE_KEY" ]; then
-            echo "ISSUE_KEY=$ISSUE_KEY" >> $GITHUB_ENV
             echo "ISSUE_FOUND=true" >> $GITHUB_ENV
-            echo "Found Jira issue key: $ISSUE_KEY"
+            echo "Final Jira issue key: $ISSUE_KEY"
           else
             echo "ISSUE_FOUND=false" >> $GITHUB_ENV
             echo "::warning::No Jira issue key found in PR title or branch name"
