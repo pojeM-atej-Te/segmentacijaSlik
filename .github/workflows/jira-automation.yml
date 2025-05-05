@@ -30,32 +30,28 @@ jobs:
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
 
-      - name: Extract issue key (title + branch fallback)
+      - name: Extract issue key (from title or branch)
         id: extract-key
         run: |
           ISSUE_KEY=""
-          PR_TITLE="${{ github.event.pull_request.title }}"
-          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+          if [ "${{ env.HAS_TITLE }}" == "true" ]; then
+            PR_TITLE="${{ github.event.pull_request.title }}"
+            ISSUE_KEY=$(echo "$PR_TITLE" | grep -o -E '[A-Z]+-[0-9]+' | head -n 1)
 
-          echo "Checking PR title: $PR_TITLE"
-
-          # Standard pattern
-          ISSUE_KEY=$(echo "$PR_TITLE" | grep -o -E '[A-Z]+-[0-9]+' | head -n 1)
-
-          # Fallback: handle "seg 5" type
-          if [ -z "$ISSUE_KEY" ]; then
-            SEG_NUM=$(echo "$PR_TITLE" | grep -o -E 'seg\s+[0-9]+' | sed -E 's/seg\s+([0-9]+)/\1/' | head -n 1)
-            if [ -n "$SEG_NUM" ]; then
-              ISSUE_KEY="SEG-$SEG_NUM"
+            if [ -z "$ISSUE_KEY" ]; then
+              SEG_NUM=$(echo "$PR_TITLE" | grep -o -E 'seg\s*[0-9]+' | sed -E 's/seg\s*([0-9]+)/\1/' | head -n1)
+              if [ -n "$SEG_NUM" ]; then
+                ISSUE_KEY="SEG-$SEG_NUM"
+              fi
             fi
           fi
 
-          # Fallback to branch name if still empty
           if [ -z "$ISSUE_KEY" ]; then
-            echo "No issue key found in title. Checking branch: $BRANCH_NAME"
+            BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
             ISSUE_KEY=$(echo "$BRANCH_NAME" | grep -o -E '[A-Z]+-[0-9]+' | head -n 1)
+
             if [ -z "$ISSUE_KEY" ]; then
-              SEG_NUM=$(echo "$BRANCH_NAME" | grep -o -E 'seg-?[0-9]+' | sed -E 's/seg-?([0-9]+).*/\1/' | head -n 1)
+              SEG_NUM=$(echo "$BRANCH_NAME" | grep -o -E 'seg-([0-9]+)' | sed -E 's/seg-([0-9]+).*/\1/' | head -n1)
               if [ -n "$SEG_NUM" ]; then
                 ISSUE_KEY="SEG-$SEG_NUM"
               fi
@@ -63,21 +59,9 @@ jobs:
           fi
 
           if [ -n "$ISSUE_KEY" ]; then
-            echo "Found issue key: $ISSUE_KEY"
             echo "ISSUE_KEY=$ISSUE_KEY" >> $GITHUB_ENV
-            echo "::set-output name=issue_key::$ISSUE_KEY"
-          else
-            echo "No Jira issue key found"
-            echo "ISSUE_KEY=" >> $GITHUB_ENV
-            echo "::set-output name=issue_key::"
-          fi
-
-      - name: Check if issue key was found
-        id: check-issue
-        run: |
-          if [ -n "${{ steps.extract-key.outputs.issue_key }}" ]; then
             echo "ISSUE_FOUND=true" >> $GITHUB_ENV
-            echo "::notice::Final Jira issue key: ${{ steps.extract-key.outputs.issue_key }}"
+            echo "Found issue key: $ISSUE_KEY"
           else
             echo "ISSUE_FOUND=false" >> $GITHUB_ENV
             echo "::warning::No Jira issue key found in PR title or branch name"
@@ -88,13 +72,14 @@ jobs:
         if: env.ISSUE_FOUND == 'true'
         uses: atlassian/gajira-transition@master
         with:
-          issue: ${{ steps.extract-key.outputs.issue_key }}
+          issue: ${{ env.ISSUE_KEY }}
           list: true
+        continue-on-error: true
 
       - name: Show available transitions
         if: env.ISSUE_FOUND == 'true'
         run: |
-          echo "Available transitions for ${{ steps.extract-key.outputs.issue_key }}:"
+          echo "Available transitions for ${{ env.ISSUE_KEY }}:"
           echo "${{ steps.get-transitions.outputs.transitions }}"
 
       - name: Move Jira issue to Done
@@ -102,15 +87,16 @@ jobs:
         if: env.ISSUE_FOUND == 'true'
         uses: atlassian/gajira-transition@master
         with:
-          issue: ${{ steps.extract-key.outputs.issue_key }}
-          transition: "31"
+          issue: ${{ env.ISSUE_KEY }}
+          transition: "21"  # Change this based on your actual Jira transition ID
+        timeout-minutes: 1
 
       - name: Verify transition success
         if: env.ISSUE_FOUND == 'true'
         run: |
           if [ "${{ steps.transition.outcome }}" == "success" ]; then
-            echo "✅ Successfully moved ${{ steps.extract-key.outputs.issue_key }} to Done status"
+            echo "Successfully moved ${{ env.ISSUE_KEY }} to Done status"
           else
-            echo "::error::Failed to transition ${{ steps.extract-key.outputs.issue_key }} to Done status"
+            echo "::error::Failed to transition ${{ env.ISSUE_KEY }} to Done status"
             exit 1
           fi
